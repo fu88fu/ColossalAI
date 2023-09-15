@@ -9,19 +9,8 @@ from transformers.generation import GenerationConfig
 from transformers.generation.stopping_criteria import StoppingCriteriaList
 from transformers.tokenization_utils_base import BatchEncoding
 
-from colossalai.gptq.cai_gptq import CaiQuantLinear
-from colossalai.gptq.gptq_tp import replace_autogptq_linear
 from colossalai.shardformer import ShardConfig, ShardFormer
 from colossalai.shardformer.policies.auto_policy import get_autopolicy
-
-HAS_GPTQ_CUDA = False
-try:
-    from colossalai.kernel.op_builder.gptq import GPTQBuilder
-    gptq_cuda = GPTQBuilder().load()
-    HAS_GPTQ_CUDA = True
-except ImportError:
-    warnings.warn('CUDA gptq is not installed')
-    HAS_GPTQ_CUDA = False
 
 from .batch_infer_state import BatchInferState
 from .kvcache_manager import MemoryManager
@@ -99,6 +88,15 @@ class TPInferEngine:
                                            self.layer_num)
 
     def _post_init_gptq_buffer(self, model: nn.Module) -> None:
+        from colossalai.inference.quant.gptq.cai_gptq import CaiQuantLinear
+        HAS_GPTQ_CUDA = False
+        try:
+            from colossalai.kernel.op_builder.gptq import GPTQBuilder
+            gptq_cuda = GPTQBuilder().load()
+            HAS_GPTQ_CUDA = True
+        except ImportError:
+            warnings.warn('CUDA gptq is not installed')
+            HAS_GPTQ_CUDA = False
 
         for name, submodule in model.named_modules():
             if isinstance(submodule, CaiQuantLinear):
@@ -179,12 +177,11 @@ class TPInferEngine:
         model_name = model.__class__.__name__
         assert model_name in self.supported_models, f"Unsupported model cls {model_name} for TP inference."
         policy = get_autopolicy(model, inference_only=True)
+        self.model, _ = shardformer.optimize(model, policy)
 
         if self.shard_config.inference_gptq:
-            tp_rank = dist.get_rank(self.shard_config.tensor_parallel_process_group)
-            replace_autogptq_linear(model, tp_size=self.tp_size, tp_rank=tp_rank)
             self._post_init_gptq_buffer(model)
-        self.model, _ = shardformer.optimize(model, policy)
+
         self.model = self.model.cuda()
 
     @property

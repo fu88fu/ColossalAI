@@ -36,23 +36,36 @@ class BloomModelInferPolicy(BloomForCausalLMPolicy):
 
     def module_policy(self):
         from transformers.models.bloom.modeling_bloom import BloomAttention, BloomBlock, BloomForCausalLM, BloomModel
-        policy = {}
-        if not self.shard_config.inference_gptq:
-            policy = super().module_policy()
-        else:
-            policy[BloomModel] = ModulePolicyDescription(
-                attribute_replacement={
-                    "num_heads": self.model.config.n_head // self.shard_config.tensor_parallel_size,
-                },
-                method_replacement={
-                    "build_alibi_tensor": build_bloom_alibi_tensor_fn(self.shard_config.tensor_parallel_process_group)
-                },
-                sub_module_replacement=[
-                    SubModuleReplacementDescription(
-                        suffix="word_embeddings",
-                        target_module=col_nn.VocabParallelEmbedding1D,
-                    )
-                ])
+        policy = super().module_policy()
+        if self.shard_config.inference_gptq:
+            from colossalai.inference.quant.gptq.cai_gptq import ColCaiQuantLinear, RowCaiQuantLinear
+            policy[BloomBlock] = ModulePolicyDescription(attribute_replacement={
+                "self_attention.hidden_size": self.model.config.hidden_size // self.shard_config.tensor_parallel_size,
+                "self_attention.split_size": self.model.config.hidden_size // self.shard_config.tensor_parallel_size,
+                "self_attention.num_heads": self.model.config.n_head // self.shard_config.tensor_parallel_size,
+            },
+                                                         sub_module_replacement=[
+                                                             SubModuleReplacementDescription(
+                                                                 suffix="self_attention.query_key_value",
+                                                                 target_module=ColCaiQuantLinear,
+                                                                 kwargs={'split_num': 3}),
+                                                             SubModuleReplacementDescription(
+                                                                 suffix="self_attention.dense",
+                                                                 target_module=RowCaiQuantLinear,
+                                                                 kwargs={'split_num': 1}),
+                                                             SubModuleReplacementDescription(
+                                                                 suffix="self_attention.attention_dropout",
+                                                                 target_module=col_nn.DropoutForParallelInput,
+                                                             ),
+                                                             SubModuleReplacementDescription(
+                                                                 suffix="mlp.dense_h_to_4h",
+                                                                 target_module=ColCaiQuantLinear,
+                                                                 kwargs={'split_num': 1}),
+                                                             SubModuleReplacementDescription(
+                                                                 suffix="mlp.dense_4h_to_h",
+                                                                 target_module=RowCaiQuantLinear,
+                                                                 kwargs={'split_num': 1}),
+                                                         ])
         # NOTE set inference mode to shard config
         self.shard_config._infer()
 
